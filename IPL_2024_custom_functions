@@ -1,0 +1,171 @@
+--Function Created to Analyse Data
+
+CREATE OR REPLACE FUNCTION get_batsmen_with_sufficient_balls()
+RETURNS TABLE (BATSMANNAME VARCHAR) AS $$
+BEGIN
+    RETURN QUERY EXECUTE '
+    WITH YEAR_WISE_BATTING AS (
+        SELECT
+            BATSMANNAME,
+            SUM(CASE WHEN MATCHYEAR = 2021 THEN BALLS_PLAYED ELSE 0 END) AS BALLS_PLAYED_2021,
+            SUM(CASE WHEN MATCHYEAR = 2022 THEN BALLS_PLAYED ELSE 0 END) AS BALLS_PLAYED_2022,
+            SUM(CASE WHEN MATCHYEAR = 2023 THEN BALLS_PLAYED ELSE 0 END) AS BALLS_PLAYED_2023
+        FROM (
+            SELECT
+                BATSMANNAME,
+                MATCHYEAR,
+                SUM(BALLS) AS BALLS_PLAYED
+            FROM
+                FACT_BATTING_SUMMARY B
+            INNER JOIN
+                DIM_MATCH_SUMMARY M ON B.MATCH_ID = M.MATCH_ID
+            GROUP BY
+                BATSMANNAME, MATCHYEAR
+        ) AS subquery
+        GROUP BY
+            BATSMANNAME
+    )
+    SELECT BATSMANNAME FROM YEAR_WISE_BATTING 
+    WHERE BALLS_PLAYED_2021 > 60
+    AND BALLS_PLAYED_2022 > 60
+    AND BALLS_PLAYED_2023 > 60
+    ORDER BY 1';
+END;
+$$ LANGUAGE plpgsql;
+
+
+CREATE OR REPLACE FUNCTION get_batsman_out_count(p_batsman VARCHAR)
+RETURNS INT
+AS $$
+DECLARE
+    out_count INT;
+BEGIN
+    SELECT COUNT(OUT_NOTOUT) INTO out_count
+    FROM FACT_BATTING_SUMMARY
+    WHERE BATSMANNAME = p_batsman
+    AND OUT_NOTOUT = 'out';
+    
+    RETURN out_count;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION get_batsman_out_count_yearly(p_batsman VARCHAR, p_year NUMERIC)
+RETURNS INT
+AS $$
+DECLARE
+    out_count INT;
+BEGIN
+    SELECT COUNT(OUT_NOTOUT) INTO out_count
+    FROM FACT_BATTING_SUMMARY B
+	INNER JOIN DIM_MATCH_SUMMARY M
+	ON B.MATCH_ID=M.MATCH_ID
+    WHERE BATSMANNAME = p_batsman
+	AND MATCHYEAR = p_year
+    AND OUT_NOTOUT = 'out';
+    
+    RETURN out_count;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION get_top_batsmen_for_year(year_input INT)
+RETURNS TABLE (batsman_name VARCHAR, avg_runs_scored NUMERIC) AS
+$$
+BEGIN
+    RETURN QUERY 
+    SELECT BATSMANNAME, ROUND(SUM(RUNS) / get_batsman_out_count_yearly(BATSMANNAME, year_input), 2) AS AVG_RUNS_SCORED
+    FROM FACT_BATTING_SUMMARY 
+    WHERE BATSMANNAME IN (SELECT * FROM get_batsmen_with_sufficient_balls())
+    GROUP BY BATSMANNAME
+    ORDER BY AVG_RUNS_SCORED DESC
+    LIMIT 10;
+END;
+$$
+LANGUAGE plpgsql;
+------------------------------------------
+CREATE OR REPLACE FUNCTION get_balls_from_overs(p_over NUMERIC)
+RETURNS INT
+AS $$
+DECLARE
+    no_of_balls INT;
+BEGIN
+    SELECT
+	(CASE 
+		WHEN p_over - FLOOR(p_over) = 0.1 THEN 1 + FLOOR(p_over) * 6
+		WHEN p_over - FLOOR(p_over) = 0.2 THEN 2 + FLOOR(p_over) * 6 
+		WHEN p_over - FLOOR(p_over) = 0.3 THEN 3 + FLOOR(p_over) * 6 
+		WHEN p_over - FLOOR(p_over) = 0.4 THEN 4 + FLOOR(p_over) * 6 
+		WHEN p_over - FLOOR(p_over) = 0.5 THEN 5 + FLOOR(p_over) * 6 
+		ELSE FLOOR(p_over) * 6 
+	END) INTO no_of_balls;
+    
+    RETURN no_of_balls;
+END;
+$$ LANGUAGE plpgsql;
+
+
+-----
+;
+
+CREATE OR REPLACE FUNCTION get_bowler_with_sufficient_balls()
+RETURNS TABLE (BOWLERNAME VARCHAR) AS $$
+BEGIN
+    RETURN QUERY EXECUTE '
+	WITH YEAR_WISE_BOWLING AS (
+        SELECT
+            BOWLERNAME,
+            SUM(CASE WHEN MATCHYEAR = 2021 THEN BALLS_BOWLED ELSE 0 END) AS BALLS_BOWLED_2021,
+            SUM(CASE WHEN MATCHYEAR = 2022 THEN BALLS_BOWLED ELSE 0 END) AS BALLS_BOWLED_2022,
+            SUM(CASE WHEN MATCHYEAR = 2023 THEN BALLS_BOWLED ELSE 0 END) AS BALLS_BOWLED_2023
+        FROM (
+            SELECT
+                BOWLERNAME,
+                MATCHYEAR,
+                SUM(OVERS*6 + MOD(OVERS,1)*10) AS BALLS_BOWLED
+            FROM
+                FACT_BOWLING_SUMMARY B
+            INNER JOIN
+                DIM_MATCH_SUMMARY M ON B.MATCH_ID = M.MATCH_ID
+            GROUP BY
+                BOWLERNAME, MATCHYEAR
+        ) AS subquery
+        GROUP BY
+            BOWLERNAME
+    )
+    SELECT BOWLERNAME FROM YEAR_WISE_BOWLING
+     WHERE BALLS_BOWLED_2021 > 60
+     AND BALLS_BOWLED_2022 > 60
+     AND BALLS_BOWLED_2023 > 60
+    ORDER BY 1';
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION get_team_winning_percentage()
+RETURNS TABLE (TEAM VARCHAR, TOTAL_MATCHES BIGINT, MATCHES_WON BIGINT, WINNING_PERCENTAGE NUMERIC) AS $$
+BEGIN
+    RETURN QUERY 
+    WITH TEAM2 AS (
+        SELECT TEAM2, COUNT(1) AS T2_COUNT 
+        FROM DIM_MATCH_SUMMARY 
+        GROUP BY TEAM2
+    ),
+    TEAM1 AS (
+        SELECT TEAM1, COUNT(1) AS T1_COUNT 
+        FROM DIM_MATCH_SUMMARY 
+        GROUP BY TEAM1
+    ),
+    WINNERS AS (
+        SELECT WINNER, COUNT(1) AS MATCHES_WON 
+        FROM DIM_MATCH_SUMMARY 
+        GROUP BY WINNER
+    )
+    SELECT T1.TEAM1, T1.T1_COUNT + T2.T2_COUNT AS TOTAL_MATCHES, WINNERS.MATCHES_WON,
+           ROUND(WINNERS.MATCHES_WON * 100.0 / (T1.T1_COUNT + T2.T2_COUNT),2) AS WINNING_PERCENTAGE
+    FROM TEAM1 T1
+    INNER JOIN TEAM2 T2 ON T1.TEAM1 = T2.TEAM2
+    INNER JOIN WINNERS ON WINNER = T1.TEAM1
+    ORDER BY WINNING_PERCENTAGE DESC;
+END;
+$$ LANGUAGE plpgsql;
+
+
+
